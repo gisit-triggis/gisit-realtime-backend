@@ -4,7 +4,7 @@ go 1.24.1
 
 require (
 	github.com/gin-gonic/gin v1.10.0
-	github.com/gisit-triggis/gisit-proto v0.0.0-20250403205355-2d0a2d8baeff
+	github.com/gisit-triggis/gisit-proto v0.0.0-20250404181313-c830a720f736
 	github.com/gocql/gocql v1.7.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
