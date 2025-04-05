@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"github.com/gisit-triggis/gisit-realtime-backend/pkg/gocqlx/qb" // Импортируем qb
 	"github.com/gocql/gocql"
 	"github.com/google/uuid"
 	"io"
@@ -27,7 +28,7 @@ type UserPosition struct {
 	LastUpdated time.Time `db:"last_updated"`
 }
 
-var userPositionTable = table.New(table.Metadata{
+var userPositionMetadata = table.Metadata{
 	Name: "user_live_state",
 	Columns: []string{
 		"user_id",
@@ -39,7 +40,9 @@ var userPositionTable = table.New(table.Metadata{
 	},
 	PartKey: []string{"user_id"},
 	SortKey: nil,
-})
+}
+
+var userPositionTable = table.New(userPositionMetadata)
 
 type PositionHistory struct {
 	UserID    string    `db:"user_id"`
@@ -50,7 +53,7 @@ type PositionHistory struct {
 	Status    string    `db:"status"`
 }
 
-var positionHistoryTable = table.New(table.Metadata{
+var positionHistoryMetadata = table.Metadata{ // Переименовано для ясности
 	Name: "position_history",
 	Columns: []string{
 		"user_id",
@@ -62,7 +65,8 @@ var positionHistoryTable = table.New(table.Metadata{
 	},
 	PartKey: []string{"user_id"},
 	SortKey: []string{"timestamp"},
-})
+}
+var positionHistoryTable = table.New(positionHistoryMetadata)
 
 type PositionHandler struct {
 	proto.UnimplementedPositionServiceServer
@@ -194,12 +198,12 @@ func (h *PositionHandler) GetAllPositions(ctx context.Context, req *proto.GetAll
 	positions, err := h.getAllPositions(ctx)
 	if err != nil {
 		if err == gocql.ErrNotFound {
-			h.logger.Info("No live positions found in database.")
+			h.logger.Info("GetAllPositions completed: No positions found.")
 			return &proto.GetAllPositionsResponse{
 				Positions: []*proto.PositionUpdate{},
 			}, nil
 		}
-		h.logger.Error("Failed to retrieve positions", zap.Error(err))
+		h.logger.Error("Failed to retrieve positions from getAllPositions", zap.Error(err))
 		return nil, status.Error(codes.Internal, "failed to retrieve positions")
 	}
 
@@ -241,8 +245,13 @@ func (h *PositionHandler) savePosition(ctx context.Context, update *proto.Positi
 		zap.Any("position", position),
 		zap.Any("history", history))
 
-	stmtLive, namesLive := userPositionTable.Insert()
+	keyspace := h.getKeyspaceName()
+
+	stmtLive, namesLive := qb.Insert(keyspace + "." + userPositionTable.Name()).
+		Columns(userPositionMetadata.Columns...).
+		ToCql()
 	qLive := h.session.ContextQuery(ctx, stmtLive, namesLive).BindStruct(position)
+
 	h.logger.Debug("Executing query for current position",
 		zap.String("statement", stmtLive),
 		zap.Strings("names", namesLive))
@@ -252,7 +261,9 @@ func (h *PositionHandler) savePosition(ctx context.Context, update *proto.Positi
 	}
 	h.logger.Debug("Current position saved successfully", zap.String("userId", update.UserId))
 
-	stmtHistory, namesHistory := positionHistoryTable.Insert()
+	stmtHistory, namesHistory := qb.Insert(keyspace + "." + positionHistoryTable.Name()).
+		Columns(positionHistoryMetadata.Columns...).
+		ToCql()
 	qHistory := h.session.ContextQuery(ctx, stmtHistory, namesHistory).BindStruct(history)
 	h.logger.Debug("Executing query for position history",
 		zap.String("statement", stmtHistory),
@@ -281,14 +292,22 @@ func (h *PositionHandler) getAllPositions(ctx context.Context) ([]*proto.Positio
 	h.logger.Info("Getting all positions from database")
 
 	var positions []UserPosition
-
 	keyspace := h.getKeyspaceName()
-	stmt := fmt.Sprintf("SELECT user_id, lat, lon, speed, status, last_updated FROM %s.%s", keyspace, userPositionTable.Name)
+	fullTableName := keyspace + "." + userPositionTable.Name()
 
-	q := h.session.ContextQuery(ctx, stmt, nil)
+	stmt, names := qb.Select(fullTableName).
+		Columns(userPositionMetadata.Columns...).
+		ToCql()
+
+	q := h.session.ContextQuery(ctx, stmt, names)
 
 	err := q.SelectRelease(&positions)
 	if err != nil {
+		if err == gocql.ErrNotFound {
+			h.logger.Info("No live positions found in database.")
+		} else {
+			h.logger.Error("Error querying positions", zap.String("statement", stmt), zap.Error(err))
+		}
 		return []*proto.PositionUpdate{}, err
 	}
 
