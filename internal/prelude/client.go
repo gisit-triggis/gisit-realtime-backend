@@ -74,8 +74,24 @@ func runMigrations(session *gocqlx.Session, logger *zap.Logger) {
 	) WITH default_time_to_live = 1800;`
 
 	if err := session.Query(createUserLiveState, nil).Exec(); err != nil {
-		logger.Fatal("Failed to migrate table vehicle_live_state", zap.Error(err))
+		logger.Fatal("Failed to migrate table user_live_state", zap.Error(err))
 	}
 
-	logger.Info("Migration applied: vehicle_live_state")
+	createPositionHistory := `
+	CREATE TABLE IF NOT EXISTS position_history (
+		user_id TEXT,
+		timestamp TIMESTAMP,
+		lat DOUBLE,
+		lon DOUBLE,
+		speed DOUBLE,
+		status TEXT,
+		PRIMARY KEY (user_id, timestamp)
+	) WITH CLUSTERING ORDER BY (timestamp DESC)
+	AND default_time_to_live = 2592000;`
+
+	if err := session.Query(createPositionHistory, nil).Exec(); err != nil {
+		logger.Fatal("Failed to migrate table position_history", zap.Error(err))
+	}
+
+	logger.Info("Database migrations completed successfully")
 }

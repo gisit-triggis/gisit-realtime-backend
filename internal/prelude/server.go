@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/gisit-triggis/gisit-realtime-backend/internal/app/ws"
 	"github.com/gisit-triggis/gisit-realtime-backend/internal/prelude/servers"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/scylladb/gocqlx/v3"
 	"go.uber.org/zap"
@@ -17,9 +18,15 @@ func InitServer(client *gocqlx.Session, logger *zap.Logger, redis *redis.Client)
 	defer logger.Info("Servers exited properly")
 	defer client.Close()
 
-	wsHub := ws.NewWsHub(os.Getenv("NODE_ID"), redis)
+	nodeID := os.Getenv("NODE_ID")
+	if nodeID == "" {
+		nodeID = uuid.New().String()
+		logger.Info("Generated node ID", zap.String("nodeID", nodeID))
+	}
 
-	grpcServer, cleanup := servers.InitGrpcServer(client, logger)
+	wsHub := ws.NewWsHub(nodeID, redis)
+
+	grpcServer, cleanup := servers.InitGrpcServer(client, logger, wsHub)
 	defer cleanup()
 	defer grpcServer.GracefulStop()
 

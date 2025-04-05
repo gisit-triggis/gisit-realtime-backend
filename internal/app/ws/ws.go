@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	proto "github.com/gisit-triggis/gisit-proto/gen/go/position/v1"
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"log"
@@ -12,8 +13,9 @@ import (
 )
 
 const (
-	RedisChannel   = "ws-broadcast"
-	UserNodeMapKey = "user_node_map"
+	RedisChannel     = "ws-broadcast"
+	UserNodeMapKey   = "user_node_map"
+	BroadcastChannel = "broadcast-all"
 )
 
 type MsgPayload struct {
@@ -21,6 +23,16 @@ type MsgPayload struct {
 	Message []byte `json:"message"`
 	From    string `json:"from_node"`
 	To      string `json:"to_node"`
+}
+
+type PositionMessage struct {
+	Type      string  `json:"type"`
+	UserID    string  `json:"user_id"`
+	Lat       float64 `json:"lat"`
+	Lon       float64 `json:"lon"`
+	Speed     float64 `json:"speed"`
+	Status    string  `json:"status"`
+	Timestamp string  `json:"timestamp"`
 }
 
 type WsHub struct {
@@ -101,6 +113,19 @@ func (h *WsHub) SendMessageToUser(ctx context.Context, userID string, message []
 	return h.rdb.Publish(ctx, RedisChannel, data).Err()
 }
 
+func (h *WsHub) BroadcastMessage(ctx context.Context, message []byte) error {
+	h.broadcastLocal(message)
+
+	payload := MsgPayload{
+		UserID:  "",
+		Message: message,
+		From:    h.nodeID,
+		To:      "",
+	}
+	data, _ := json.Marshal(payload)
+	return h.rdb.Publish(ctx, BroadcastChannel, data).Err()
+}
+
 func (h *WsHub) sendLocal(userID string, message []byte) error {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -119,20 +144,94 @@ func (h *WsHub) sendLocal(userID string, message []byte) error {
 	return nil
 }
 
-func (h *WsHub) subscribePubSub() {
-	ctx := context.Background()
-	sub := h.rdb.Subscribe(ctx, RedisChannel)
-	ch := sub.Channel()
+func (h *WsHub) broadcastLocal(message []byte) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 
-	for msg := range ch {
-		var payload MsgPayload
-		if err := json.Unmarshal([]byte(msg.Payload), &payload); err != nil {
-			log.Println("failed to unmarshal pubsub payload:", err)
-			continue
-		}
-
-		if payload.To == h.nodeID {
-			_ = h.sendLocal(payload.UserID, payload.Message)
+	for userID, conns := range h.connections {
+		for _, c := range conns {
+			err := c.WriteMessage(websocket.TextMessage, message)
+			if err != nil {
+				log.Printf("Broadcast error to userID=%s: %v\n", userID, err)
+			}
 		}
 	}
+}
+
+func (h *WsHub) subscribePubSub() {
+	ctx := context.Background()
+
+	directSub := h.rdb.Subscribe(ctx, RedisChannel)
+	directCh := directSub.Channel()
+
+	broadcastSub := h.rdb.Subscribe(ctx, BroadcastChannel)
+	broadcastCh := broadcastSub.Channel()
+
+	go func() {
+		for msg := range directCh {
+			var payload MsgPayload
+			if err := json.Unmarshal([]byte(msg.Payload), &payload); err != nil {
+				log.Println("failed to unmarshal pubsub direct payload:", err)
+				continue
+			}
+
+			if payload.To == h.nodeID {
+				_ = h.sendLocal(payload.UserID, payload.Message)
+			}
+		}
+	}()
+
+	go func() {
+		for msg := range broadcastCh {
+			var payload MsgPayload
+			if err := json.Unmarshal([]byte(msg.Payload), &payload); err != nil {
+				log.Println("failed to unmarshal pubsub broadcast payload:", err)
+				continue
+			}
+
+			if payload.From != h.nodeID {
+				h.broadcastLocal(payload.Message)
+			}
+		}
+	}()
+}
+
+func ConvertPositionUpdateToJSON(update *proto.PositionUpdate) ([]byte, error) {
+	message := PositionMessage{
+		Type:      "position_update",
+		UserID:    update.UserId,
+		Lat:       update.Latitude,
+		Lon:       update.Longitude,
+		Speed:     update.Speed,
+		Status:    update.Status,
+		Timestamp: update.Timestamp,
+	}
+
+	return json.Marshal(message)
+}
+
+func ConvertPositionsToJSON(updates []*proto.PositionUpdate) ([]byte, error) {
+	positions := make([]PositionMessage, len(updates))
+
+	for i, update := range updates {
+		positions[i] = PositionMessage{
+			Type:      "position_update",
+			UserID:    update.UserId,
+			Lat:       update.Latitude,
+			Lon:       update.Longitude,
+			Speed:     update.Speed,
+			Status:    update.Status,
+			Timestamp: update.Timestamp,
+		}
+	}
+
+	message := struct {
+		Type      string            `json:"type"`
+		Positions []PositionMessage `json:"positions"`
+	}{
+		Type:      "initial_positions",
+		Positions: positions,
+	}
+
+	return json.Marshal(message)
 }
