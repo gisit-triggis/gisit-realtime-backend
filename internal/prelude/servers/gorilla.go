@@ -93,6 +93,30 @@ func (h *GorillaHandler) sendInitialPositions(ctx context.Context, conn *websock
 		return
 	}
 
+	if len(positionsResp.Positions) == 0 {
+		h.logger.Info("No initial positions to send to client")
+
+		emptyPositionsMessage := struct {
+			Type      string `json:"type"`
+			Positions []any  `json:"positions"`
+		}{
+			Type:      "initial_positions",
+			Positions: []any{},
+		}
+
+		data, err := json.Marshal(emptyPositionsMessage)
+		if err != nil {
+			h.logger.Error("Failed to create empty positions message", zap.Error(err))
+			return
+		}
+
+		err = conn.WriteMessage(websocket.TextMessage, data)
+		if err != nil {
+			h.logger.Error("Failed to send empty positions message", zap.Error(err))
+		}
+		return
+	}
+
 	positionsData, err := ws.ConvertPositionsToJSON(positionsResp.Positions)
 	if err != nil {
 		h.logger.Error("Failed to convert positions to JSON", zap.Error(err))
@@ -104,7 +128,6 @@ func (h *GorillaHandler) sendInitialPositions(ctx context.Context, conn *websock
 		h.logger.Error("Failed to send initial positions", zap.Error(err))
 	}
 }
-
 func (h *GorillaHandler) readPump(conn *websocket.Conn, userID string) {
 	defer conn.Close()
 	for {

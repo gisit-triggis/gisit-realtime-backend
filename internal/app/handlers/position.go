@@ -58,6 +58,19 @@ func (h *PositionHandler) UpdatePosition(ctx context.Context, req *proto.Positio
 		return nil, status.Error(codes.InvalidArgument, "user_id is required")
 	}
 
+	if req.Timestamp == "" {
+		req.Timestamp = time.Now().Format(time.RFC3339)
+	} else {
+		_, err := time.Parse(time.RFC3339, req.Timestamp)
+		if err != nil {
+			h.logger.Warn("Invalid timestamp format received",
+				zap.String("userId", req.UserId),
+				zap.String("timestamp", req.Timestamp),
+				zap.Error(err))
+			req.Timestamp = time.Now().Format(time.RFC3339)
+		}
+	}
+
 	if err := h.savePosition(ctx, req); err != nil {
 		h.logger.Error("Failed to save position", zap.Error(err))
 		return nil, status.Error(codes.Internal, "failed to save position")
@@ -90,8 +103,33 @@ func (h *PositionHandler) StreamPositionUpdates(stream proto.PositionService_Str
 				return err
 			}
 
+			if update.UserId == "" {
+				h.logger.Warn("Received position update with empty user_id, skipping")
+				continue
+			}
+
+			if update.Timestamp == "" {
+				update.Timestamp = time.Now().Format(time.RFC3339)
+			} else {
+				_, err := time.Parse(time.RFC3339, update.Timestamp)
+				if err != nil {
+					h.logger.Warn("Invalid timestamp format received in stream",
+						zap.String("userId", update.UserId),
+						zap.String("timestamp", update.Timestamp),
+						zap.Error(err))
+					update.Timestamp = time.Now().Format(time.RFC3339)
+				}
+			}
+
 			if err := h.savePosition(ctx, update); err != nil {
 				h.logger.Error("Failed to save position", zap.Error(err))
+				if err := stream.SendMsg(&proto.PositionResponse{
+					Success: false,
+					Message: "Failed to save position: " + err.Error(),
+				}); err != nil {
+					h.logger.Error("Failed to send error response", zap.Error(err))
+					return err
+				}
 				continue
 			}
 
@@ -188,7 +226,13 @@ func (h *PositionHandler) getAllPositions(ctx context.Context) ([]*proto.Positio
 	var positions []UserPosition
 	stmt, names := userPositionTable.Select()
 	q := h.session.Query(stmt, names)
-	if err := q.SelectRelease(&positions); err != nil {
+
+	err := q.SelectRelease(&positions)
+	if err != nil {
+		if err.Error() == "gocql: expected 1 values send got 0" {
+			h.logger.Info("No positions found in the database")
+			return []*proto.PositionUpdate{}, nil
+		}
 		return nil, err
 	}
 
