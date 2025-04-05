@@ -3,7 +3,10 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"github.com/gocql/gocql"
+	"github.com/google/uuid"
 	"io"
+	"os"
 	"time"
 
 	proto "github.com/gisit-triggis/gisit-proto/gen/go/position/v1"
@@ -36,6 +39,29 @@ var userPositionTable = table.New(table.Metadata{
 	},
 	PartKey: []string{"user_id"},
 	SortKey: nil,
+})
+
+type PositionHistory struct {
+	UserID    string    `db:"user_id"`
+	Timestamp time.Time `db:"timestamp"`
+	Latitude  float64   `db:"lat"`
+	Longitude float64   `db:"lon"`
+	Speed     float64   `db:"speed"`
+	Status    string    `db:"status"`
+}
+
+var positionHistoryTable = table.New(table.Metadata{
+	Name: "position_history",
+	Columns: []string{
+		"user_id",
+		"timestamp",
+		"lat",
+		"lon",
+		"speed",
+		"status",
+	},
+	PartKey: []string{"user_id"},
+	SortKey: []string{"timestamp"},
 })
 
 type PositionHandler struct {
@@ -167,6 +193,12 @@ func (h *PositionHandler) StreamPositionUpdates(stream proto.PositionService_Str
 func (h *PositionHandler) GetAllPositions(ctx context.Context, req *proto.GetAllPositionsRequest) (*proto.GetAllPositionsResponse, error) {
 	positions, err := h.getAllPositions(ctx)
 	if err != nil {
+		if err == gocql.ErrNotFound {
+			h.logger.Info("No live positions found in database.")
+			return &proto.GetAllPositionsResponse{
+				Positions: []*proto.PositionUpdate{},
+			}, nil
+		}
 		h.logger.Error("Failed to retrieve positions", zap.Error(err))
 		return nil, status.Error(codes.Internal, "failed to retrieve positions")
 	}
@@ -175,29 +207,6 @@ func (h *PositionHandler) GetAllPositions(ctx context.Context, req *proto.GetAll
 		Positions: positions,
 	}, nil
 }
-
-type PositionHistory struct {
-	UserID    string    `db:"user_id"`
-	Timestamp time.Time `db:"timestamp"`
-	Latitude  float64   `db:"lat"`
-	Longitude float64   `db:"lon"`
-	Speed     float64   `db:"speed"`
-	Status    string    `db:"status"`
-}
-
-var positionHistoryTable = table.New(table.Metadata{
-	Name: "position_history",
-	Columns: []string{
-		"user_id",
-		"timestamp",
-		"lat",
-		"lon",
-		"speed",
-		"status",
-	},
-	PartKey: []string{"user_id"},
-	SortKey: []string{"timestamp"},
-})
 
 func (h *PositionHandler) savePosition(ctx context.Context, update *proto.PositionUpdate) error {
 	timestamp, err := time.Parse(time.RFC3339, update.Timestamp)
@@ -232,24 +241,24 @@ func (h *PositionHandler) savePosition(ctx context.Context, update *proto.Positi
 		zap.Any("position", position),
 		zap.Any("history", history))
 
-	stmt, names := userPositionTable.Insert()
-	q := h.session.Query(stmt, names).BindStruct(position)
+	stmtLive, namesLive := userPositionTable.Insert()
+	qLive := h.session.ContextQuery(ctx, stmtLive, namesLive).BindStruct(position)
 	h.logger.Debug("Executing query for current position",
-		zap.String("statement", stmt),
-		zap.Strings("names", names))
+		zap.String("statement", stmtLive),
+		zap.Strings("names", namesLive))
 
-	if err := q.ExecRelease(); err != nil {
+	if err := qLive.ExecRelease(); err != nil {
 		return fmt.Errorf("failed to save current position: %w", err)
 	}
 	h.logger.Debug("Current position saved successfully", zap.String("userId", update.UserId))
 
-	stmt, names = positionHistoryTable.Insert()
-	q = h.session.Query(stmt, names).BindStruct(history)
+	stmtHistory, namesHistory := positionHistoryTable.Insert()
+	qHistory := h.session.ContextQuery(ctx, stmtHistory, namesHistory).BindStruct(history)
 	h.logger.Debug("Executing query for position history",
-		zap.String("statement", stmt),
-		zap.Strings("names", names))
+		zap.String("statement", stmtHistory),
+		zap.Strings("names", namesHistory))
 
-	if err := q.ExecRelease(); err != nil {
+	if err := qHistory.ExecRelease(); err != nil {
 		h.logger.Error("Failed to save position history",
 			zap.String("userId", update.UserId),
 			zap.Error(err))
@@ -260,48 +269,60 @@ func (h *PositionHandler) savePosition(ctx context.Context, update *proto.Positi
 	return nil
 }
 
+func (h *PositionHandler) getKeyspaceName() string {
+	keyspace := os.Getenv("SCYLLA_KEYSPACE")
+	if keyspace == "" {
+		keyspace = "realtime"
+	}
+	return keyspace
+}
+
 func (h *PositionHandler) getAllPositions(ctx context.Context) ([]*proto.PositionUpdate, error) {
 	h.logger.Info("Getting all positions from database")
 
 	var positions []UserPosition
-	stmt, names := userPositionTable.Select()
 
-	h.logger.Debug("Executing query",
-		zap.String("statement", stmt),
-		zap.Strings("names", names))
+	keyspace := h.getKeyspaceName()
+	stmt := fmt.Sprintf("SELECT user_id, lat, lon, speed, status, last_updated FROM %s.%s", keyspace, userPositionTable.Name)
 
-	q := h.session.Query(stmt, names)
+	q := h.session.ContextQuery(ctx, stmt, nil)
 
-	iter := q.Iter()
-
-	var position UserPosition
-	count := 0
-	for iter.StructScan(&position) {
-		positions = append(positions, position)
-		h.logger.Debug("Found position",
-			zap.String("userId", position.UserID),
-			zap.Float64("lat", position.Latitude),
-			zap.Float64("lon", position.Longitude))
-		count++
+	err := q.SelectRelease(&positions)
+	if err != nil {
+		return []*proto.PositionUpdate{}, err
 	}
 
-	if err := iter.Close(); err != nil {
-		h.logger.Error("Error closing iterator", zap.Error(err))
-		return nil, err
-	}
+	h.logger.Info("Retrieved positions from database", zap.Int("count", len(positions)))
 
-	h.logger.Info("Retrieved positions from database", zap.Int("count", count))
-
-	result := make([]*proto.PositionUpdate, 0, len(positions))
-	for _, p := range positions {
-		result = append(result, &proto.PositionUpdate{
+	result := make([]*proto.PositionUpdate, len(positions))
+	for i, p := range positions {
+		result[i] = &proto.PositionUpdate{
 			UserId:    p.UserID,
 			Latitude:  p.Latitude,
 			Longitude: p.Longitude,
 			Speed:     p.Speed,
 			Status:    p.Status,
 			Timestamp: p.LastUpdated.Format(time.RFC3339),
-		})
+		}
+	}
+
+	if len(result) == 0 && os.Getenv("DEBUG") == "true" && os.Getenv("INSERT_TEST_POSITION") == "true" {
+		h.logger.Info("No positions found, adding test position for debugging")
+		testUser := "test-user-" + uuid.New().String()[:8]
+		testPosProto := &proto.PositionUpdate{
+			UserId:    testUser,
+			Latitude:  55.751244,
+			Longitude: 37.618423,
+			Speed:     60.0,
+			Status:    "ACTIVE",
+			Timestamp: time.Now().Format(time.RFC3339),
+		}
+		if saveErr := h.savePosition(ctx, testPosProto); saveErr != nil {
+			h.logger.Error("Failed to save test position", zap.Error(saveErr))
+			return []*proto.PositionUpdate{}, nil
+		}
+		h.logger.Info("Test position saved successfully", zap.String("userId", testUser))
+		return []*proto.PositionUpdate{testPosProto}, nil
 	}
 
 	return result, nil
