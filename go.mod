@@ -1,5 +1,9 @@
 module github.com/gisit-triggis/gisit-realtime-backend
 
+replace github.com/gocql/gocql => github.com/scylladb/gocql v1.14.4
+
+replace github.com/scylladb/gocqlx/v3 => ./pkg/gocqlx
+
 go 1.24.1
 
 require (

@@ -3,9 +3,9 @@ package handlers
 import (
 	"context"
 	"fmt"
-	"github.com/gisit-triggis/gisit-realtime-backend/pkg/gocqlx/qb" // Импортируем qb
 	"github.com/gocql/gocql"
 	"github.com/google/uuid"
+	"github.com/scylladb/gocqlx/v3/qb"
 	"io"
 	"os"
 	"time"
