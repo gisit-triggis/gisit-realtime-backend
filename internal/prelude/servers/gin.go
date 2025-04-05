@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/gin-gonic/gin"
+	authProto "github.com/gisit-triggis/gisit-proto/gen/go/auth/v1"
 	"github.com/gisit-triggis/gisit-realtime-backend/internal/app/ws"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -14,9 +15,18 @@ import (
 )
 
 func InitGinServer(logger *zap.Logger, wsHub *ws.WsHub) (*http.Server, func()) {
-	cleanup := func() {
-		
+	authConn, err := initGRPCClient(os.Getenv("AUTH_SERVICE_ADDR"))
+	if err != nil {
+		logger.Fatal("Failed to connect to catalog service", zap.Error(err))
 	}
+
+	cleanup := func() {
+		if err := authConn.Close(); err != nil {
+			logger.Error("Failed to close auth service connection", zap.Error(err))
+		}
+	}
+
+	authClient := authProto.NewAuthClient(authConn)
 
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -27,7 +37,7 @@ func InitGinServer(logger *zap.Logger, wsHub *ws.WsHub) (*http.Server, func()) {
 
 	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	gH := NewGorillaHandler(logger, wsHub)
+	gH := NewGorillaHandler(authClient, logger, wsHub)
 	router.GET("/ws", gH.handleWebSocket)
 
 	httpServer := &http.Server{

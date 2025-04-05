@@ -2,22 +2,26 @@ package servers
 
 import (
 	"github.com/gin-gonic/gin"
+	authProto "github.com/gisit-triggis/gisit-proto/gen/go/auth/v1"
 	"github.com/gisit-triggis/gisit-realtime-backend/internal/app/ws"
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"net/http"
 )
 
 type GorillaHandler struct {
-	logger *zap.Logger
-	wsHub  *ws.WsHub
+	authSvc authProto.AuthClient
+	logger  *zap.Logger
+	wsHub   *ws.WsHub
 }
 
-func NewGorillaHandler(logger *zap.Logger, wsHub *ws.WsHub) *GorillaHandler {
+func NewGorillaHandler(authSvc authProto.AuthClient, logger *zap.Logger, wsHub *ws.WsHub) *GorillaHandler {
 	return &GorillaHandler{
-		logger: logger,
-		wsHub:  wsHub,
+		authSvc: authSvc,
+		logger:  logger,
+		wsHub:   wsHub,
 	}
 }
 
@@ -35,19 +39,19 @@ func (h *GorillaHandler) handleWebSocket(c *gin.Context) {
 		return
 	}
 
-	//resp, err := h.authSvc.ValidateToken(c, &authProto.ValidateTokenRequest{
-	//	Token: token,
-	//})
-	//if err != nil {
-	//	h.logger.Error("Failed to validate token", zap.Error(err))
-	//	st, ok := status.FromError(err)
-	//	if ok && st.Code() == codes.Unauthenticated {
-	//		c.String(http.StatusUnauthorized, "Invalid token")
-	//	} else {
-	//		c.String(http.StatusInternalServerError, "Failed to validate token")
-	//	}
-	//	return
-	//}
+	resp, err := h.authSvc.AuthorizeByToken(c, &authProto.AuthorizeByTokenRequest{
+		Token: token,
+	})
+	if err != nil {
+		h.logger.Error("Failed to validate token", zap.Error(err))
+		st, ok := status.FromError(err)
+		if ok && st.Code() == codes.Unauthenticated {
+			c.String(http.StatusUnauthorized, "Invalid token")
+		} else {
+			c.String(http.StatusInternalServerError, "Failed to validate token")
+		}
+		return
+	}
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -56,8 +60,7 @@ func (h *GorillaHandler) handleWebSocket(c *gin.Context) {
 	}
 	conn.EnableWriteCompression(true)
 
-	//userID := resp.UserId
-	userID := uuid.New().String()
+	userID := resp.Id
 	h.wsHub.AddConnection(c.Request.Context(), userID, conn)
 	defer h.wsHub.RemoveConnection(c.Request.Context(), userID, conn)
 

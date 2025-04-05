@@ -67,8 +67,13 @@ func (h *WsHub) RemoveConnection(ctx context.Context, userID string, conn *webso
 			break
 		}
 	}
+
 	if len(conns) == 0 {
 		delete(h.connections, userID)
+		_, err := h.rdb.HDel(ctx, UserNodeMapKey, userID).Result()
+		if err != nil {
+			log.Printf("WARN: Failed to remove user %s from node map in Redis: %v", userID, err)
+		}
 	} else {
 		h.connections[userID] = conns
 	}
