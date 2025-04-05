@@ -57,14 +57,19 @@ func NewWsHub(nodeID string, redisClient *redis.Client) *WsHub {
 }
 
 func (h *WsHub) AddConnection(ctx context.Context, userID string, conn *websocket.Conn) error {
+	log.Printf("Adding WebSocket connection for user %s on node %s", userID, h.nodeID)
+
 	err := h.rdb.HSet(ctx, UserNodeMapKey, userID, h.nodeID).Err()
 	if err != nil {
+		log.Printf("Error setting user->node in Redis: %v", err)
 		return fmt.Errorf("failed to set user->node in redis: %w", err)
 	}
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.connections[userID] = append(h.connections[userID], conn)
+
+	log.Printf("User %s now has %d connections on node %s", userID, len(h.connections[userID]), h.nodeID)
 	return nil
 }
 
@@ -90,7 +95,6 @@ func (h *WsHub) RemoveConnection(ctx context.Context, userID string, conn *webso
 		h.connections[userID] = conns
 	}
 }
-
 func (h *WsHub) SendMessageToUser(ctx context.Context, userID string, message []byte) error {
 	nodeID, err := h.rdb.HGet(ctx, UserNodeMapKey, userID).Result()
 	if err == redis.Nil {
@@ -114,7 +118,9 @@ func (h *WsHub) SendMessageToUser(ctx context.Context, userID string, message []
 }
 
 func (h *WsHub) BroadcastMessage(ctx context.Context, message []byte) error {
-	h.broadcastLocal(message)
+	clientsCount := h.broadcastLocal(message)
+
+	log.Printf("Broadcast message locally to %d clients", clientsCount)
 
 	payload := MsgPayload{
 		UserID:  "",
@@ -123,7 +129,13 @@ func (h *WsHub) BroadcastMessage(ctx context.Context, message []byte) error {
 		To:      "",
 	}
 	data, _ := json.Marshal(payload)
-	return h.rdb.Publish(ctx, BroadcastChannel, data).Err()
+
+	err := h.rdb.Publish(ctx, BroadcastChannel, data).Err()
+	if err != nil {
+		return fmt.Errorf("failed to publish broadcast message to Redis: %w", err)
+	}
+
+	return nil
 }
 
 func (h *WsHub) sendLocal(userID string, message []byte) error {
@@ -132,30 +144,50 @@ func (h *WsHub) sendLocal(userID string, message []byte) error {
 
 	conns, ok := h.connections[userID]
 	if !ok || len(conns) == 0 {
+		log.Printf("User %s not connected on this node", userID)
 		return errors.New("user not connected on this node")
 	}
 
-	for _, c := range conns {
+	log.Printf("Sending message to user %s with %d connections", userID, len(conns))
+
+	sentCount := 0
+	for i, c := range conns {
 		err := c.WriteMessage(websocket.TextMessage, message)
 		if err != nil {
-			log.Printf("Send error to userID=%s: %v\n", userID, err)
+			log.Printf("Send error to userID=%s connection #%d: %v\n", userID, i, err)
+		} else {
+			sentCount++
 		}
 	}
+
+	log.Printf("Successfully sent message to %d/%d connections for user %s", sentCount, len(conns), userID)
+
 	return nil
 }
 
-func (h *WsHub) broadcastLocal(message []byte) {
+func (h *WsHub) broadcastLocal(message []byte) int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
+	if len(h.connections) == 0 {
+		log.Printf("No clients connected for broadcast")
+		return 0
+	}
+
+	totalClients := 0
 	for userID, conns := range h.connections {
 		for _, c := range conns {
 			err := c.WriteMessage(websocket.TextMessage, message)
 			if err != nil {
 				log.Printf("Broadcast error to userID=%s: %v\n", userID, err)
+			} else {
+				totalClients++
 			}
 		}
 	}
+
+	log.Printf("Broadcast message to %d clients", totalClients)
+	return totalClients
 }
 
 func (h *WsHub) subscribePubSub() {
@@ -167,6 +199,8 @@ func (h *WsHub) subscribePubSub() {
 	broadcastSub := h.rdb.Subscribe(ctx, BroadcastChannel)
 	broadcastCh := broadcastSub.Channel()
 
+	log.Printf("WebSocket hub subscribed to Redis channels: %s and %s", RedisChannel, BroadcastChannel)
+
 	go func() {
 		for msg := range directCh {
 			var payload MsgPayload
@@ -176,6 +210,7 @@ func (h *WsHub) subscribePubSub() {
 			}
 
 			if payload.To == h.nodeID {
+				log.Printf("Received direct message for user %s from node %s", payload.UserID, payload.From)
 				_ = h.sendLocal(payload.UserID, payload.Message)
 			}
 		}
@@ -190,6 +225,7 @@ func (h *WsHub) subscribePubSub() {
 			}
 
 			if payload.From != h.nodeID {
+				log.Printf("Received broadcast message from node %s", payload.From)
 				h.broadcastLocal(payload.Message)
 			}
 		}
@@ -207,7 +243,13 @@ func ConvertPositionUpdateToJSON(update *proto.PositionUpdate) ([]byte, error) {
 		Timestamp: update.Timestamp,
 	}
 
-	return json.Marshal(message)
+	data, err := json.Marshal(message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal position update: %w", err)
+	}
+
+	log.Printf("Converted position update to JSON for user %s: %s", update.UserId, string(data))
+	return data, nil
 }
 
 func ConvertPositionsToJSON(updates []*proto.PositionUpdate) ([]byte, error) {
@@ -233,5 +275,11 @@ func ConvertPositionsToJSON(updates []*proto.PositionUpdate) ([]byte, error) {
 		Positions: positions,
 	}
 
-	return json.Marshal(message)
+	data, err := json.Marshal(message)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal positions to JSON: %w", err)
+	}
+
+	log.Printf("Converted %d positions to JSON with size %d bytes", len(updates), len(data))
+	return data, nil
 }

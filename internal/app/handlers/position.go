@@ -58,6 +58,14 @@ func (h *PositionHandler) UpdatePosition(ctx context.Context, req *proto.Positio
 		return nil, status.Error(codes.InvalidArgument, "user_id is required")
 	}
 
+	h.logger.Info("Received position update request",
+		zap.String("userId", req.UserId),
+		zap.Float64("lat", req.Latitude),
+		zap.Float64("lon", req.Longitude),
+		zap.Float64("speed", req.Speed),
+		zap.String("status", req.Status),
+		zap.String("timestamp", req.Timestamp))
+
 	if req.Timestamp == "" {
 		req.Timestamp = time.Now().Format(time.RFC3339)
 	} else {
@@ -72,12 +80,20 @@ func (h *PositionHandler) UpdatePosition(ctx context.Context, req *proto.Positio
 	}
 
 	if err := h.savePosition(ctx, req); err != nil {
-		h.logger.Error("Failed to save position", zap.Error(err))
+		h.logger.Error("Failed to save position",
+			zap.String("userId", req.UserId),
+			zap.Error(err))
 		return nil, status.Error(codes.Internal, "failed to save position")
+	} else {
+		h.logger.Info("Position saved successfully", zap.String("userId", req.UserId))
 	}
 
 	if err := h.broadcastPositionUpdate(ctx, req); err != nil {
-		h.logger.Error("Failed to broadcast position update", zap.Error(err))
+		h.logger.Error("Failed to broadcast position update",
+			zap.String("userId", req.UserId),
+			zap.Error(err))
+	} else {
+		h.logger.Info("Position update broadcast successfully", zap.String("userId", req.UserId))
 	}
 
 	return &proto.PositionResponse{
@@ -187,6 +203,10 @@ func (h *PositionHandler) savePosition(ctx context.Context, update *proto.Positi
 	timestamp, err := time.Parse(time.RFC3339, update.Timestamp)
 	if err != nil {
 		timestamp = time.Now()
+		h.logger.Warn("Using current time instead of invalid timestamp",
+			zap.String("userId", update.UserId),
+			zap.String("originalTimestamp", update.Timestamp),
+			zap.Time("newTimestamp", timestamp))
 	}
 
 	position := UserPosition{
@@ -207,16 +227,34 @@ func (h *PositionHandler) savePosition(ctx context.Context, update *proto.Positi
 		Status:    update.Status,
 	}
 
+	h.logger.Debug("Preparing to save position",
+		zap.String("userId", update.UserId),
+		zap.Any("position", position),
+		zap.Any("history", history))
+
 	stmt, names := userPositionTable.Insert()
 	q := h.session.Query(stmt, names).BindStruct(position)
+	h.logger.Debug("Executing query for current position",
+		zap.String("statement", stmt),
+		zap.Strings("names", names))
+
 	if err := q.ExecRelease(); err != nil {
 		return fmt.Errorf("failed to save current position: %w", err)
 	}
+	h.logger.Debug("Current position saved successfully", zap.String("userId", update.UserId))
 
 	stmt, names = positionHistoryTable.Insert()
 	q = h.session.Query(stmt, names).BindStruct(history)
+	h.logger.Debug("Executing query for position history",
+		zap.String("statement", stmt),
+		zap.Strings("names", names))
+
 	if err := q.ExecRelease(); err != nil {
-		h.logger.Error("Failed to save position history", zap.Error(err))
+		h.logger.Error("Failed to save position history",
+			zap.String("userId", update.UserId),
+			zap.Error(err))
+	} else {
+		h.logger.Debug("Position history saved successfully", zap.String("userId", update.UserId))
 	}
 
 	return nil
@@ -252,10 +290,27 @@ func (h *PositionHandler) getAllPositions(ctx context.Context) ([]*proto.Positio
 }
 
 func (h *PositionHandler) broadcastPositionUpdate(ctx context.Context, update *proto.PositionUpdate) error {
+	h.logger.Debug("Converting position update to JSON for broadcast",
+		zap.String("userId", update.UserId),
+		zap.Float64("lat", update.Latitude),
+		zap.Float64("lon", update.Longitude))
+
 	messageData, err := ws.ConvertPositionUpdateToJSON(update)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to convert position update to JSON: %w", err)
 	}
 
-	return h.wsHub.BroadcastMessage(ctx, messageData)
+	h.logger.Debug("Position update converted to JSON successfully",
+		zap.String("userId", update.UserId),
+		zap.ByteString("messageData", messageData))
+
+	err = h.wsHub.BroadcastMessage(ctx, messageData)
+	if err != nil {
+		return fmt.Errorf("failed to broadcast message to clients: %w", err)
+	}
+
+	h.logger.Debug("Message broadcast to all clients successfully",
+		zap.String("userId", update.UserId))
+
+	return nil
 }
