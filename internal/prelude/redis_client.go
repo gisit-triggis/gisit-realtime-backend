@@ -8,7 +8,7 @@ import (
 func InitRedisClient() *redis.Client {
 	return redis.NewClient(&redis.Options{
 		Addr:     os.Getenv("REDIS_REALTIME_HOST"),
-		Password: os.Getenv("REDIS_REALTIME_PASS"),
+		Password: "",
 		DB:       0,
 	})
 }
