@@ -261,18 +261,36 @@ func (h *PositionHandler) savePosition(ctx context.Context, update *proto.Positi
 }
 
 func (h *PositionHandler) getAllPositions(ctx context.Context) ([]*proto.PositionUpdate, error) {
+	h.logger.Info("Getting all positions from database")
+
 	var positions []UserPosition
 	stmt, names := userPositionTable.Select()
+
+	h.logger.Debug("Executing query",
+		zap.String("statement", stmt),
+		zap.Strings("names", names))
+
 	q := h.session.Query(stmt, names)
 
-	err := q.SelectRelease(&positions)
-	if err != nil {
-		if err.Error() == "gocql: expected 1 values send got 0" {
-			h.logger.Info("No positions found in the database")
-			return []*proto.PositionUpdate{}, nil
-		}
+	iter := q.Iter()
+
+	var position UserPosition
+	count := 0
+	for iter.StructScan(&position) {
+		positions = append(positions, position)
+		h.logger.Debug("Found position",
+			zap.String("userId", position.UserID),
+			zap.Float64("lat", position.Latitude),
+			zap.Float64("lon", position.Longitude))
+		count++
+	}
+
+	if err := iter.Close(); err != nil {
+		h.logger.Error("Error closing iterator", zap.Error(err))
 		return nil, err
 	}
+
+	h.logger.Info("Retrieved positions from database", zap.Int("count", count))
 
 	result := make([]*proto.PositionUpdate, 0, len(positions))
 	for _, p := range positions {
