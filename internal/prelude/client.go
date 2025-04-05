@@ -55,7 +55,27 @@ func InitClient(logger *zap.Logger) *gocqlx.Session {
 		logger.Fatal("Failed to wrap ScyllaDB session", zap.Error(err))
 	}
 
+	runMigrations(&mainSession, logger)
+
 	logger.Info("ScyllaDB connection initialized successfully.")
 
 	return &mainSession
+}
+
+func runMigrations(session *gocqlx.Session, logger *zap.Logger) {
+	createUserLiveState := `
+	CREATE TABLE IF NOT EXISTS user_live_state (
+		user_id TEXT PRIMARY KEY,
+		lat DOUBLE,
+		lon DOUBLE,
+		speed DOUBLE,
+		status TEXT,
+		last_updated TIMESTAMP
+	) WITH default_time_to_live = 1800;`
+
+	if err := session.Query(createUserLiveState, nil).Exec(); err != nil {
+		logger.Fatal("Failed to migrate table vehicle_live_state", zap.Error(err))
+	}
+
+	logger.Info("Migration applied: vehicle_live_state")
 }
