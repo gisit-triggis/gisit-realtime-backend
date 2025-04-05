@@ -70,19 +70,33 @@ func (h *WsHub) AddConnection(ctx context.Context, userID string, conn *websocke
 	h.connections[userID] = append(h.connections[userID], conn)
 
 	log.Printf("User %s now has %d connections on node %s", userID, len(h.connections[userID]), h.nodeID)
+
+	log.Printf("Current connections state: %d users total", len(h.connections))
+	for uid, conns := range h.connections {
+		log.Printf("- User %s: %d connections", uid, len(conns))
+	}
+
 	return nil
 }
 
 func (h *WsHub) RemoveConnection(ctx context.Context, userID string, conn *websocket.Conn) {
+	log.Printf("Removing WebSocket connection for user %s", userID)
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	conns := h.connections[userID]
+	found := false
 	for i, c := range conns {
 		if c == conn {
 			conns = append(conns[:i], conns[i+1:]...)
+			found = true
 			break
 		}
+	}
+
+	if !found {
+		log.Printf("WARNING: Connection not found for user %s", userID)
 	}
 
 	if len(conns) == 0 {
@@ -91,13 +105,22 @@ func (h *WsHub) RemoveConnection(ctx context.Context, userID string, conn *webso
 		if err != nil {
 			log.Printf("WARN: Failed to remove user %s from node map in Redis: %v", userID, err)
 		}
+		log.Printf("User %s removed from connections list", userID)
 	} else {
 		h.connections[userID] = conns
+		log.Printf("User %s now has %d remaining connections", userID, len(conns))
+	}
+
+	log.Printf("Current connections after removal: %d users total", len(h.connections))
+	for uid, conns := range h.connections {
+		log.Printf("- User %s: %d connections", uid, len(conns))
 	}
 }
+
 func (h *WsHub) SendMessageToUser(ctx context.Context, userID string, message []byte) error {
 	nodeID, err := h.rdb.HGet(ctx, UserNodeMapKey, userID).Result()
 	if err == redis.Nil {
+		log.Printf("User %s not found in Redis node map", userID)
 		return errors.New("user not found in redis")
 	} else if err != nil {
 		return fmt.Errorf("redis error: %w", err)
@@ -169,25 +192,42 @@ func (h *WsHub) broadcastLocal(message []byte) int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	if len(h.connections) == 0 {
-		log.Printf("No clients connected for broadcast")
+	totalConnections := 0
+	for _, conns := range h.connections {
+		totalConnections += len(conns)
+	}
+
+	if totalConnections == 0 {
+		log.Printf("No clients connected for broadcast (users: %d, connections: 0)", len(h.connections))
 		return 0
 	}
 
-	totalClients := 0
+	totalSent := 0
+	failedSent := 0
+
 	for userID, conns := range h.connections {
+		successForUser := 0
+		failedForUser := 0
+
 		for _, c := range conns {
 			err := c.WriteMessage(websocket.TextMessage, message)
 			if err != nil {
 				log.Printf("Broadcast error to userID=%s: %v\n", userID, err)
+				failedForUser++
+				failedSent++
 			} else {
-				totalClients++
+				successForUser++
+				totalSent++
 			}
 		}
+
+		log.Printf("Broadcast results for user %s: %d sent, %d failed",
+			userID, successForUser, failedForUser)
 	}
 
-	log.Printf("Broadcast message to %d clients", totalClients)
-	return totalClients
+	log.Printf("Broadcast message summary: %d messages sent successfully, %d failed",
+		totalSent, failedSent)
+	return totalSent
 }
 
 func (h *WsHub) subscribePubSub() {
